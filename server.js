@@ -8,7 +8,7 @@ const upload = multer({ dest: 'uploads/' });
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.post('/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
 
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided' });
@@ -20,11 +20,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   const originalExtension = path.extname(originalFilename);
 
   if (!allowedExtensions.includes(originalExtension)) {
-    fs.unlink(req.file.path, (err) => {
-      if (err) {
-        console.error(err);
-      }
-    });
+    await fs.promises.unlink(req.file.path);
     return res.status(400).json({ error: 'Invalid file type' });
   }
 
@@ -39,33 +35,25 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       filename: newFilename,
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to upload the file' });
+    res.status(400).json({ error: 'Failed to upload the file' });
   }
 });
 
-app.get('/uploads', async (req, res) => {
+app.get('/api/uploads', async (req, res) => {
   try {
     const files = await fs.promises.readdir('uploads/');
     res.json({ files });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Error reading files' });
+    res.status(400).json({ message: 'Error reading files' });
   };
 });
 
-app.get('/uploads/:filename', async (req, res) => {
+app.get('/api/uploads/:filename', async (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(__dirname, 'uploads', filename);
 
   try {
-    const fileExists = await fs.promises.access(filePath, fs.constants.F_OK)
-      .then(() => true)
-      .catch(() => false);
-
-    if (!fileExists) {
-      return res.status(404).json({ error: 'File not found' });
-    }
+    await fs.promises.access(filePath, fs.constants.F_OK)
 
     const contentType = getContentType(filename);
     res.contentType(contentType);
@@ -75,8 +63,7 @@ app.get('/uploads/:filename', async (req, res) => {
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to retrieve the file' });
+    res.status(404).json({ error: 'File not found' });
   }
 });
 
@@ -129,29 +116,22 @@ function getContentType(filename) {
   }
 }
 
-app.delete('/delete/:filename', async (req, res) => {
-  const filename = req.params.filename;
+app.delete('/api/delete', async (req, res) => {
+  const filename = req.body.filename;
   const filePath = path.join(__dirname, 'uploads', filename);
 
   try {
-    const fileExists = await fs.promises.access(filePath, fs.constants.F_OK)
-      .then(() => true)
-      .catch(() => false);
-
-    if (!fileExists) {
-      return res.status(404).json({ error: 'File not found' });
-    }
+    await fs.promises.access(filePath, fs.constants.F_OK)
 
     await fs.promises.unlink(filePath);
     res.json({ message: `File "${filename}" deleted successfully!` });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to delete the file' });
+    res.status(404).json({ error: 'File not found' });
   };
 });
 
-app.put('/rename/:filename', async (req, res) => {
-  const oldFilename = req.params.filename;
+app.put('/api/rename', async (req, res) => {
+  const oldFilename = req.body.oldFilename;
   const newFilename = req.body.newFilename;
 
   if (!newFilename) {
@@ -162,19 +142,12 @@ app.put('/rename/:filename', async (req, res) => {
   const newFilePath = path.join(__dirname, 'uploads', newFilename);
 
   try {
-    const fileExists = await fs.promises.access(oldFilePath, fs.constants.F_OK)
-      .then(() => true)
-      .catch(() => false);
-
-    if (!fileExists) {
-      return res.status(404).json({ error: 'File not found' });
-    }
+    await fs.promises.access(oldFilePath, fs.constants.F_OK)
 
     await fs.promises.rename(oldFilePath, newFilePath);
     res.json({ message: `File "${oldFilename}" renamed to "${newFilename}" successfully!` });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to rename the file' });
+    res.status(404).json({ error: 'File not found' });
   };
 });
 
