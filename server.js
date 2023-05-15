@@ -33,8 +33,8 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   const newPath = path.join(__dirname, 'uploads', newFilename);
 
   try {
-    fs.rename(oldPath, newPath);
-    res.json({
+    await fs.promises.rename(oldPath, newPath);
+    res.status(201).json({
       message: 'File uploaded successfully!',
       filename: newFilename,
     });
