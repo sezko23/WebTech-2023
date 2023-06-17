@@ -1,15 +1,67 @@
+require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path'); 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
+const bcrypt = require('bcryptjs');
+const passport = require('./passport');
+const dbModule = require('./db');
+const db = dbModule.db
+const jwt = require('jsonwebtoken');
+const queries = require('./queries');
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(passport.initialize());
 
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+function isValidEmail(email) {
+  const regex = /^[a-zA-Z0-9._%-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,4}$/;
+  return regex.test(email);
+}
 
+app.post('/register', async (req, res) => {
+  const { username, email, password } = req.body;
+
+  try {
+    const existingUserByUsername = await db.oneOrNone(queries.checkIfUsernameExists, [username]);
+    const existingUserByEmail = await db.oneOrNone(queries.checkIfEmailExists, [email]);
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email' });
+    }
+
+    if (existingUserByUsername) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+
+    if (existingUserByEmail) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password should be at least 8 characters long' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await db.none('INSERT INTO webtech.userDB (username, email, password) VALUES ($1, $2, $3)', [username, email, hashedPassword]);
+
+    res.json({ message: 'User registered successfully!' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to register user', message: err.message });
+  }
+});
+
+app.post('/login', passport.authenticate('local', { session: false }), (req, res) => {
+  const user = req.user;
+  const token = jwt.sign({ sub: user.id }, process.env.JWT_SECRET, {expiresIn: '1h'});
+  res.json({ token });
+});
+
+app.post('/api/upload', passport.authenticate('jwt', { session: false }), upload.single('file'), async (req, res) => {
+  console.log(req.user);
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided' });
   }
@@ -30,6 +82,17 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
   try {
     await fs.promises.rename(oldPath, newPath);
+    const metadata = {
+      userId: req.user.id,
+      filename: newFilename,
+      originalName: originalFilename,
+      size: req.file.size,
+      uploadDate: new Date().toISOString(),
+      mimeType: req.file.mimetype,
+      path: newPath
+    };
+
+    await db.none('INSERT INTO webtech.files (userId, filename, originalName, size, uploadDate, mimeType, path) VALUES ($1, $2, $3, $4, $5, $6, $7)', [metadata.userId, metadata.filename, metadata.originalName, metadata.size, metadata.uploadDate, metadata.mimeType, metadata.path]);
     res.status(201).json({
       message: 'File uploaded successfully!',
       filename: newFilename,
@@ -39,27 +102,33 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-app.get('/api/uploads', async (req, res) => {
+app.get('/api/uploads', passport.authenticate('jwt', { session: false }), async (req, res) => {
   try {
-    const files = await fs.promises.readdir('uploads/');
+    const files = await db.any('SELECT * FROM webtech.files WHERE userId = $1', [req.user.id]);
     res.json({ files });
   } catch (error) {
     res.status(400).json({ message: 'Error reading files' });
   };
 });
 
-app.get('/api/uploads/:filename', async (req, res) => {
+app.get('/api/uploads/:filename', passport.authenticate('jwt', { session: false }), async (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(__dirname, 'uploads', filename);
+  const fileMetadata = await db.oneOrNone('SELECT * FROM webtech.files WHERE filename = $1', [filename]);
+
+  if (!fileMetadata) {
+    return res.status(404).json({ error: 'File not found in metadata' });
+  }
+
+  if (fileMetadata.userid !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
 
   try {
     await fs.promises.access(filePath, fs.constants.F_OK)
-
     const contentType = getContentType(filename);
     res.contentType(contentType);
-
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
   } catch (error) {
@@ -67,6 +136,59 @@ app.get('/api/uploads/:filename', async (req, res) => {
   }
 });
 
+app.delete('/api/delete',passport.authenticate('jwt', { session: false }), async (req, res) => {
+  const filename = req.body.filename;
+  const filePath = path.join(__dirname, 'uploads', filename);
+  const fileMetadata = await db.oneOrNone('SELECT * FROM webtech.files WHERE filename = $1', [filename]);
+
+  if (!fileMetadata) {
+    return res.status(404).json({ error: 'File not found in metadata' });
+  }
+
+  if (fileMetadata.userid !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  try {
+    await fs.promises.access(filePath, fs.constants.F_OK)
+    await fs.promises.unlink(filePath);
+    await db.none('DELETE FROM webtech.files WHERE filename = $1', [filename]);
+    res.json({ message: `File "${filename}" deleted successfully!` });
+  } catch (error) {
+    res.status(404).json({ error: 'File not found' });
+  };
+});
+
+app.put('/api/rename',passport.authenticate('jwt', { session: false }), async (req, res) => {
+  const oldFilename = req.body.oldFilename;
+  const newFilename = req.body.newFilename;
+
+  const fileMetadata = await db.oneOrNone('SELECT * FROM webtech.files WHERE filename = $1', [oldFilename]);
+
+  if (!fileMetadata) {
+    return res.status(404).json({ error: 'File not found in metadata' });
+  }
+
+  if (fileMetadata.userid !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  if (!newFilename) {
+    return res.status(400).json({ error: 'New filename is required' });
+  }
+
+  const oldFilePath = path.join(__dirname, 'uploads', oldFilename);
+  const newFilePath = path.join(__dirname, 'uploads', newFilename);
+
+  try {
+    await fs.promises.access(oldFilePath, fs.constants.F_OK)
+    await fs.promises.rename(oldFilePath, newFilePath);
+    await db.none('UPDATE webtech.files SET filename = $1 WHERE filename = $2', [newFilename, oldFilename]);
+    res.json({ message: `File "${oldFilename}" renamed to "${newFilename}" successfully!` });
+  } catch (error) {
+    res.status(404).json({ error: 'File not found' });
+  };
+});
 
 function getContentType(filename) {
   const ext = path.extname(filename);
@@ -115,42 +237,6 @@ function getContentType(filename) {
       return 'application/octet-stream';
   }
 }
-
-app.delete('/api/delete', async (req, res) => {
-  const filename = req.body.filename;
-  const filePath = path.join(__dirname, 'uploads', filename);
-
-  try {
-    await fs.promises.access(filePath, fs.constants.F_OK)
-
-    await fs.promises.unlink(filePath);
-    res.json({ message: `File "${filename}" deleted successfully!` });
-  } catch (error) {
-    res.status(404).json({ error: 'File not found' });
-  };
-});
-
-app.put('/api/rename', async (req, res) => {
-  const oldFilename = req.body.oldFilename;
-  const newFilename = req.body.newFilename;
-
-  if (!newFilename) {
-    return res.status(400).json({ error: 'New filename is required' });
-  }
-
-  const oldFilePath = path.join(__dirname, 'uploads', oldFilename);
-  const newFilePath = path.join(__dirname, 'uploads', newFilename);
-
-  try {
-    await fs.promises.access(oldFilePath, fs.constants.F_OK)
-
-    await fs.promises.rename(oldFilePath, newFilePath);
-    res.json({ message: `File "${oldFilename}" renamed to "${newFilename}" successfully!` });
-  } catch (error) {
-    res.status(404).json({ error: 'File not found' });
-  };
-});
-
 
 const port = 3000; 
 app.listen(port, () => {
