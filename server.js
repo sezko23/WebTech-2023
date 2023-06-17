@@ -11,7 +11,9 @@ const dbModule = require('./db');
 const db = dbModule.db
 const jwt = require('jsonwebtoken');
 const queries = require('./queries');
+const cors = require('cors');
 
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(passport.initialize());
