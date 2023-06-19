@@ -64,7 +64,6 @@ app.post('/login', passport.authenticate('local', { session: false }), (req, res
 });
 
 app.post('/api/upload', passport.authenticate('jwt', { session: false }), upload.single('file'), async (req, res) => {
-  console.log(req.user);
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided' });
   }
